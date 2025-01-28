@@ -41,33 +41,40 @@ async def startup_event():
                 connection.close()
         except mysql.connector.Error as e:
             if e.errno == errorcode.CR_CONN_HOST_ERROR:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Database connection failed: Server IP not whitelisted. Please add this server's IP to the database whitelist."
-                )
+                print("ERROR: Server IP not whitelisted")
+                # Don't raise the exception here, just log it
             else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Database connection failed: {str(e)}"
-                )
+                print(f"Database connection error: {str(e)}")
+                # Don't raise the exception here, just log it
 
         # Initialize the LangGraph workflow with memory
         global workflow
         memory = MemorySaver()
         workflow = create_workflow().compile(checkpointer=memory)
         print("LangGraph workflow initialized successfully with memory")
-    except HTTPException as e:
-        raise e
     except Exception as e:
         print(f"Startup error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Startup failed: {str(e)}"
-        )
+        # Don't raise the exception here, just log it
 
 @app.get("/")
 async def root():
-    return {"message": "Mitrat LangGraph API v1.0 is running"}
+    try:
+        # Test database connection again to ensure it's still working
+        connection = get_connection()
+        if connection:
+            connection.close()
+        return {"message": "Mitrat LangGraph API v1.0 is running"}
+    except mysql.connector.Error as e:
+        if e.errno == errorcode.CR_CONN_HOST_ERROR:
+            raise HTTPException(
+                status_code=403,
+                detail="Database connection failed: Server IP not whitelisted. Please add this server's IP to the database whitelist."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database connection failed: {str(e)}"
+            )
 
 @app.get("/chat")
 async def chat_endpoint_get(query: str = Body(..., embed=True)):
