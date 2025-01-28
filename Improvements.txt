@@ -1,0 +1,19 @@
+V11
+Session ID
+Response Time
+Removed detect conversational state
+Add timers in the agents to note down the response time
+Less tokens with less temperature
+
+V12
+Better SQL query generation
+Less code
+Better Response time
+Good for complex queries
+
+V13
+Intent identification
+Spelling correction
+
+V14
+Langgraph
