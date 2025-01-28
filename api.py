@@ -3,10 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import time
-from MitratLangV1 import create_workflow, State
+from MitratLangV1 import create_workflow, State, get_connection
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from fastapi.responses import StreamingResponse
+import mysql.connector
+from mysql.connector import errorcode
 
 app = FastAPI(
     title="Mitrat LangGraph API",
@@ -30,14 +32,38 @@ class ChatRequest(BaseModel):
 async def startup_event():
     """Initialize workflow on startup"""
     try:
+        # Test database connection first
+        connection = None
+        try:
+            connection = get_connection()
+            if connection:
+                print("Database connection successful")
+                connection.close()
+        except mysql.connector.Error as e:
+            if e.errno == errorcode.CR_CONN_HOST_ERROR:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Database connection failed: Server IP not whitelisted. Please add this server's IP to the database whitelist."
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Database connection failed: {str(e)}"
+                )
+
         # Initialize the LangGraph workflow with memory
         global workflow
         memory = MemorySaver()
         workflow = create_workflow().compile(checkpointer=memory)
         print("LangGraph workflow initialized successfully with memory")
+    except HTTPException as e:
+        raise e
     except Exception as e:
         print(f"Startup error: {str(e)}")
-        raise
+        raise HTTPException(
+            status_code=500,
+            detail=f"Startup failed: {str(e)}"
+        )
 
 @app.get("/")
 async def root():
