@@ -32,21 +32,6 @@ class ChatRequest(BaseModel):
 async def startup_event():
     """Initialize workflow on startup"""
     try:
-        # Test database connection first
-        connection = None
-        try:
-            connection = get_connection()
-            if connection:
-                print("Database connection successful")
-                connection.close()
-        except mysql.connector.Error as e:
-            if e.errno == errorcode.CR_CONN_HOST_ERROR:
-                print("ERROR: Server IP not whitelisted")
-                # Don't raise the exception here, just log it
-            else:
-                print(f"Database connection error: {str(e)}")
-                # Don't raise the exception here, just log it
-
         # Initialize the LangGraph workflow with memory
         global workflow
         memory = MemorySaver()
@@ -59,13 +44,13 @@ async def startup_event():
 @app.get("/")
 async def root():
     try:
-        # Test database connection again to ensure it's still working
+        # Test database connection
         connection = get_connection()
         if connection:
             connection.close()
         return {"message": "Mitrat LangGraph API v1.0 is running"}
-    except mysql.connector.Error as e:
-        if e.errno == errorcode.CR_CONN_HOST_ERROR:
+    except Exception as e:
+        if "Server IP not whitelisted" in str(e):
             raise HTTPException(
                 status_code=403,
                 detail="Database connection failed: Server IP not whitelisted. Please add this server's IP to the database whitelist."
