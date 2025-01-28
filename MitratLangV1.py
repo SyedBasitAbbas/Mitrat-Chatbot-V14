@@ -26,25 +26,34 @@ print("Environment variables loaded")
 # Initialize the client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Add a connection pool or reuse a single connection
-connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-    pool_name="mitrat_pool",
-    pool_size=5,
-    host=os.getenv('DB_HOST'),
-    user=os.getenv('DB_USER'),
-    password=os.getenv('DB_PASSWORD'),
-    database=os.getenv('DB_NAME'),
-    port=3306,
-    connect_timeout=30,
-    raise_on_warnings=True,
-    use_pure=True,
-    auth_plugin='mysql_native_password',
-    ssl_disabled=True
-)
+# Remove the connection_pool initialization from the global scope
+connection_pool = None
 
 def get_connection():
-    """Get a connection from the pool"""
-    return connection_pool.get_connection()
+    """Get a connection from the pool (lazy initialization)"""
+    global connection_pool
+    try:
+        if connection_pool is None:
+            connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+                pool_name="mitrat_pool",
+                pool_size=5,
+                host=os.getenv('DB_HOST'),
+                user=os.getenv('DB_USER'),
+                password=os.getenv('DB_PASSWORD'),
+                database=os.getenv('DB_NAME'),
+                port=3306,
+                connect_timeout=30,
+                raise_on_warnings=True,
+                use_pure=True,
+                auth_plugin='mysql_native_password',
+                ssl_disabled=True
+            )
+        return connection_pool.get_connection()
+    except mysql.connector.Error as e:
+        if e.errno == errorcode.CR_CONN_HOST_ERROR:
+            raise Exception("Server IP not whitelisted. Please add this server's IP to the database whitelist.")
+        else:
+            raise Exception(f"Database connection failed: {str(e)}")
 
 # Cache schemas after the first retrieval
 schema_cache = {}
