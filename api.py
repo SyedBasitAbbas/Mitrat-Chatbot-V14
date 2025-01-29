@@ -13,7 +13,7 @@ from mysql.connector import errorcode
 app = FastAPI(
     title="Mitrat LangGraph API",
     description="API for processing provider queries using LangGraph",
-    version="1.0"
+    version="1.2"
 )
 
 app.add_middleware(
@@ -51,7 +51,7 @@ async def root():
         connection = get_connection()
         if connection:
             connection.close()
-        return {"message": "Mitrat LangGraph API v1.0 is running"}
+        return {"message": "Mitrat LangGraph API v1.2 is running"}
     except Exception as e:
         if "Server IP not whitelisted" in str(e):
             raise HTTPException(
@@ -63,41 +63,6 @@ async def root():
                 status_code=500,
                 detail=f"Database connection failed: {str(e)}"
             )
-
-@app.get("/chat")
-async def chat_endpoint_get(query: str = Body(..., embed=True)):
-    """GET endpoint with query in the body"""
-    try:
-        # Start timing for the entire request
-        start_time = time.time()
-        
-        # Prepare initial state with just the user message
-        initial_state = State(
-            messages=[HumanMessage(content=query)]
-        )
-        
-        # Process query through LangGraph workflow
-        result = workflow.invoke(initial_state)
-        
-        # Calculate total time
-        total_time = time.time() - start_time
-        
-        # Prepare response
-        response = {
-            "response": result["messages"][-1].content,
-            "performance_metrics": {
-                "total_time": f"{total_time:.2f}s",
-                **result.get("performance_metrics", {})
-            }
-        }
-        
-        return response
-        
-    except Exception as e:
-        return {
-            "error": "Query processing failed",
-            "details": str(e)
-        }
 
 @app.post("/chat")
 async def chat_endpoint_post(chat_request: ChatRequest):
