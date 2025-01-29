@@ -18,6 +18,7 @@ import time
 from openai import OpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import MessagesState
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Load environment variables
 load_dotenv(override=True)
@@ -284,6 +285,17 @@ def should_continue_after_intent(state: State) -> str:
         print("No recognized intent, defaulting to conversational_agent_node")
         return "conversational_agent_node"
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def call_model_with_retry(messages):
+    return client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=0.2,
+        max_tokens=150,
+        presence_penalty=0.6,
+        frequency_penalty=0.1
+    )
+
 def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
     print("NODE: conversational_agent_node - RUNNING")
     start_time = time.time()
@@ -325,15 +337,7 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
         ]
         
         # Use a smaller, faster model for simple responses
-        # You can adjust the model based on complexity detection
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Use your fastest available model
-            messages=messages,
-            temperature=0.2,
-            max_tokens=150,  # Limit response length
-            presence_penalty=0.6,  # Encourage focused responses
-            frequency_penalty=0.1
-        )
+        response = call_model_with_retry(messages)
         
         content = response.choices[0].message.content.strip()
         
@@ -549,10 +553,10 @@ def explain_results_node(state: State) -> Dict[str, List[AIMessage]]:
     explanation = "Here are the providers I found:\n\n"
     for result in query_results:
         explanation += f"<h2>{result.get('company', 'Unknown')}</h2>\n"
-        explanation += f"<p>Phone: {result.get('phone_number', 'N/A')}<br>\n"
-        explanation += f"Email: {result.get('email', 'N/A')}<br>\n"
-        explanation += f"Location: {result.get('address1', 'N/A')}, {result.get('city', '')}, {result.get('state_code', '')}<br>\n"
-        explanation += f"Profile: <a href=\"https://mitrat.com.au/{result['filename']}\" target=\"_blank\">View Profile</a></p><br>\n"
+        explanation += f"<p><strong>Phone:</strong> {result.get('phone_number', 'N/A')}<br>\n"
+        explanation += f"<strong>Email:</strong> {result.get('email', 'N/A')}<br>\n"
+        explanation += f"<strong>Location:</strong> {result.get('address1', 'N/A')}, {result.get('city', '')}, {result.get('state_code', '')}<br>\n"
+        explanation += f"<strong>Profile:</strong> <a href=\"https://mitrat.com.au/{result['filename']}\" target=\"_blank\">View Profile</a></p><br>\n"
     
     elapsed = time.time() - start_time
     result = {
