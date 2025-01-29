@@ -28,6 +28,9 @@ class ChatRequest(BaseModel):
     query: str
     thread_id: str
 
+# Initialize workflow globally
+workflow = None
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize workflow on startup"""
