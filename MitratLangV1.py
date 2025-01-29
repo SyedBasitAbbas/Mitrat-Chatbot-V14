@@ -287,13 +287,12 @@ def should_continue_after_intent(state: State) -> str:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def call_model_with_retry(messages):
+    print("Retrying to get the response")
     return client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.2,
-        max_tokens=150,
-        presence_penalty=0.6,
-        frequency_penalty=0.1
+        max_tokens=500,
     )
 
 def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
@@ -336,7 +335,7 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
             *conversation_history
         ]
         
-        # Use a smaller, faster model for simple responses
+
         response = call_model_with_retry(messages)
         
         content = response.choices[0].message.content.strip()
@@ -354,6 +353,7 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
         
     except Exception as e:
         print(f"Error in conversational_agent_node: {str(e)}")
+        print(f"Messages: {messages}")  # Log the messages being sent
         elapsed = time.time() - start_time
         return {
             "messages": [AIMessage(content="I apologize, but I encountered an error. Please try again.")],
@@ -372,6 +372,7 @@ def refine_query_node(state: State) -> Dict[str, Any]:
         
         print("[Refine Query Node] Refining query based on schemas...")
         schemas = state.get("schema", "")
+        print(schemas)
         
         # First prompt to refine the query
         refine_prompt = f"""As an SQL expert, convert this user request into a clear, natural language query using ONLY the exact field names from the provided schemas.
@@ -399,6 +400,7 @@ IMPORTANT RULES:
 14. For keywords always search in first_name, last_name and company in usersdata.
 15. For locations search in address1.
 *16. Never return the ndis or provider word in refined query.*
+
 
 
 
@@ -437,9 +439,9 @@ Your refined query:"""
         1. Use proper SQL syntax
         2. Include the active = 2 condition
         3. Use LIKE with wildcards for text matching
-        4. Always join with users_reviews table when sorting by rating_overall
-        5. Limit results to 5 by default
-        6. Always include 'email' and 'address1' in the SELECT statement
+        4. Limit results to 5 by default
+        5. Always include 'email' and 'address1' in the SELECT statement
+
 
 
         Generate only the SQL query, no explanations:"""
@@ -485,6 +487,27 @@ Your refined query:"""
                 "total_refine_node": f"{elapsed:.2f}s"
             }
         }
+    
+
+
+    '''
+
+        17. Always add ratings:
+            a. Always join using users_data.user_id = users_reviews.user_id
+            b. Include AVG(rating_overall) as avg_rating
+            c. Group results by users_data.user_id
+            d. Sort with highest ratings first using ORDER BY avg_rating DESC
+
+
+        7. For rating-based queries:
+        - Use INNER JOIN users_reviews ON users_data.user_id = users_reviews.member_id
+        - Include GROUP BY users_data.user_id
+        - Add ORDER BY AVG(rating_overall) DESC
+    
+    
+    
+    
+    '''
 
 def execute_query_node(state: State) -> Dict[str, List[ToolMessage]]:
     """Execute the SQL query using the tool and return results"""
