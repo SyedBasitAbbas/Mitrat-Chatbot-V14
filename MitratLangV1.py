@@ -290,71 +290,54 @@ def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
     print("NODE: conversational_agent_node - RUNNING")
     
     try:
-        # Get only the last HUMAN message
-        user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "")
+        # Get all messages from state
+        messages = state["messages"]
         
-        # Simplified message structure
-        messages = [
-            {
-                "role": "system",
-                "content": """You are Mitrat Chatbot specializing in NDIS services. Respond concisely:
-1. Keep responses under 100 words
-2. Use simple, direct language
-3. Provide specific, actionable information
-4. Include links to Mitrat website when relevant
-
-Common Response Templates:
-- For general NDIS questions: Brief explanation + suggestion to visit Mitrat website
-- For service inquiries: List 2-3 relevant services + how to search
-- For provider questions: Direct to search functionality
-- For process questions: Step-by-step brief points
-
-Format in HTML with these tags only: <p>, <br>, <strong>, <a>, <ul>, <li>
-
-Example responses:
-Q: "What is NDIS?"
-A: "<p>NDIS (National Disability Insurance Scheme) provides funding for disability supports. Visit <a href='https://mitrat.com.au/about-ndis'>Mitrat's NDIS Guide</a> for details.</p>"
-
-Q: "How do I find providers?"
-A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filtering by location<br>3. Choosing specific services</p>"
-"""},  
+        # Filter out debug messages and keep only relevant conversation
+        conversation_history = [
+            {"role": "user" if isinstance(msg, HumanMessage) else "assistant", 
+             "content": msg.content}
+            for msg in messages 
+            if not (isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.startswith("(Debug)"))
         ]
-
+        
+        # Add system message at the beginning
+        conversation_history.insert(0, {
+            "role": "system",
+            "content": """You are Mitrat Chatbot specializing in NDIS services. 
+            Maintain context of the conversation and remember important details.
+            If asked about previous questions or information, recall them from the conversation history.
+            Respond concisely using: <p>, <br>, <strong>, <a>, <ul>, <li>"""
+        })
+        
         # Add retry with specific error handling
         @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=4))
         def safe_chat_completion():
             return client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=messages,
-                temperature=0,
+                messages=conversation_history,
+                temperature=0.3,
                 max_tokens=300
             )
             
         response = safe_chat_completion()
         content = response.choices[0].message.content.strip()
         
-        # Print performance metrics
-        elapsed = time.time() - start_time
-        print(f"Conversational agent response time: {elapsed:.2f}s")
-        
         return {
             "messages": [AIMessage(content=content)],
             "performance_metrics": {
                 **state.get("performance_metrics", {}),
-                "conversational_response_time": f"{elapsed:.2f}s"
+                "conversational_response_time": f"{(time.time()-start_time):.2f}s"
             }
         }
         
     except Exception as e:
-        print(f"Error in conversational_agent_node: {str(e)}")
-        print(f"Messages: {messages}")  # Log the messages being sent
-        elapsed = time.time() - start_time
+        print(f"Conversational Error: {str(e)}")
         return {
-            "messages": [AIMessage(content="I apologize, but I encountered an error. Please try again.")],
+            "messages": [AIMessage(content="Error in conversation")],
             "performance_metrics": {
                 **state.get("performance_metrics", {}),
-                "response_time": f"{elapsed:.2f}s",
-                "error": str(e)
+                "error": str(e)[:100]  # Truncate long errors
             }
         }
 
