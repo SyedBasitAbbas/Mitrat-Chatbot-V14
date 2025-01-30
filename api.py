@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mitrat LangGraph API",
     description="API for processing provider queries using LangGraph",
-    version="1.0",
+    version="1.5",
     lifespan=lifespan
 )
 
@@ -54,7 +54,7 @@ async def root():
         connection = get_connection()
         if connection:
             connection.close()
-        return {"message": "Mitrat LangGraph API v1.0 is running"}
+        return {"message": "Mitrat LangGraph API v1.5 is running"}
     except Exception as e:
         if "Server IP not whitelisted" in str(e):
             raise HTTPException(
