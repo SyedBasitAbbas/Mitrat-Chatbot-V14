@@ -9,11 +9,27 @@ from langgraph.checkpoint.memory import MemorySaver
 from fastapi.responses import StreamingResponse
 import mysql.connector
 from mysql.connector import errorcode
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize workflow on startup"""
+    try:
+        # Initialize the LangGraph workflow with memory
+        global workflow
+        memory = MemorySaver()
+        workflow = create_workflow().compile(checkpointer=memory)
+        print("LangGraph workflow initialized successfully with memory")
+        yield
+    except Exception as e:
+        print(f"Startup error: {str(e)}")
+        # Don't raise the exception here, just log it
 
 app = FastAPI(
     title="Mitrat LangGraph API",
     description="API for processing provider queries using LangGraph",
-    version="1.3"
+    version="1.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -31,19 +47,6 @@ class ChatRequest(BaseModel):
 # Initialize workflow globally
 workflow = None
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize workflow on startup"""
-    try:
-        # Initialize the LangGraph workflow with memory
-        global workflow
-        memory = MemorySaver()
-        workflow = create_workflow().compile(checkpointer=memory)
-        print("LangGraph workflow initialized successfully with memory")
-    except Exception as e:
-        print(f"Startup error: {str(e)}")
-        # Don't raise the exception here, just log it
-
 @app.get("/")
 async def root():
     try:
@@ -51,7 +54,7 @@ async def root():
         connection = get_connection()
         if connection:
             connection.close()
-        return {"message": "Mitrat LangGraph API v1.3 is running"}
+        return {"message": "Mitrat LangGraph API v1.0 is running"}
     except Exception as e:
         if "Server IP not whitelisted" in str(e):
             raise HTTPException(
@@ -68,41 +71,61 @@ async def root():
 async def chat_endpoint_post(chat_request: ChatRequest):
     """POST endpoint for production use with thread_id"""
     try:
-        # Start timing for the entire request
         start_time = time.time()
+        perf_metrics = {}
         
-        # Get the current state from memory (if exists)
+        # Workflow creation time
+        workflow_start = time.time()
+        global workflow
+        if workflow is None:
+            memory = MemorySaver()
+            workflow = create_workflow().compile(checkpointer=memory)
+        perf_metrics["workflow_creation_time"] = f"{time.time() - workflow_start:.2f}s"
+
+        # Get current state with all fields
+        state_start = time.time()
         state_result = workflow.get_state(
             config={"configurable": {"thread_id": chat_request.thread_id}}
         )
+        current_state = state_result[0] if state_result and state_result[0] else {}
         
-        # Extract messages from state if it exists
-        messages = state_result[0]["messages"] if state_result and state_result[0] else []
-        messages.append(HumanMessage(content=chat_request.query))
-        
-        initial_state = State(
-            messages=messages
-        )
-        
-        # Process query through LangGraph workflow with thread_id
+        # Preserve existing performance metrics between requests
+        initial_state = {
+            "messages": current_state.get("messages", []) + [HumanMessage(content=chat_request.query)],
+            "performance_metrics": current_state.get("performance_metrics", {})
+        }
+
+        # Workflow execution
+        workflow_start = time.time()
         result = workflow.invoke(
-            initial_state,
+            initial_state,  # Now includes performance_metrics
             config={"configurable": {"thread_id": chat_request.thread_id}}
         )
+        perf_metrics["workflow_execution"] = f"{time.time() - workflow_start:.2f}s"
+
+        # Collect metrics directly from the final state
+        final_metrics = result.get("performance_metrics", {})
+        perf_metrics.update(final_metrics)
         
-        # Calculate total time
+        # Ensure we include all timing metrics even if some are missing
+        expected_metrics = [
+            "intent_detection_time", "get_schema_time", "refine_query_time",
+            "sql_generation_time", "execute_query_time", "explain_results_time",
+            "conversational_response_time"
+        ]
+        for metric in expected_metrics:
+            if metric not in perf_metrics:
+                perf_metrics[metric] = "N/A"
+
+        # Aggregate all metrics
         total_time = time.time() - start_time
-        
-        # Prepare response
-        response = {
+        perf_metrics["total_time"] = f"{total_time:.2f}s"
+
+        return {
             "response": result["messages"][-1].content,
-            "performance_metrics": {
-                "total_time": f"{total_time:.2f}s",
-                **result.get("performance_metrics", {})
-            }
+            "sql_query": result.get("sql_query"),
+            "performance_metrics": perf_metrics
         }
-        
-        return response
         
     except Exception as e:
         return {
