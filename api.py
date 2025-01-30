@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 import mysql.connector
 from mysql.connector import errorcode
 from contextlib import asynccontextmanager
+import google.generativeai as genai
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,6 +22,14 @@ async def lifespan(app: FastAPI):
         memory = MemorySaver()
         workflow = create_workflow().compile(checkpointer=memory)
         print("LangGraph workflow initialized successfully with memory")
+
+        # Initialize Gemini client
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_key:
+            raise ValueError("GEMINI_API_KEY environment variable not set")
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
         yield
     except Exception as e:
         print(f"Startup error: {str(e)}")
@@ -27,8 +37,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Mitrat LangGraph API",
-    description="API for processing provider queries using LangGraph",
-    version="1.5",
+    description="Mitrat API using LangGraph",
+    version="2.0",
     lifespan=lifespan
 )
 
@@ -54,7 +64,7 @@ async def root():
         connection = get_connection()
         if connection:
             connection.close()
-        return {"message": "Mitrat LangGraph API v1.5 is running"}
+        return {"message": "Mitrat LangGraph API v2.0 is running"}
     except Exception as e:
         if "Server IP not whitelisted" in str(e):
             raise HTTPException(
@@ -124,13 +134,15 @@ async def chat_endpoint_post(chat_request: ChatRequest):
         return {
             "response": result["messages"][-1].content,
             "sql_query": result.get("sql_query"),
+            "thread_id": chat_request.thread_id,
             "performance_metrics": perf_metrics
         }
         
     except Exception as e:
         return {
             "error": "Query processing failed",
-            "details": str(e)
+            "details": str(e),
+            "thread_id": chat_request.thread_id
         }
 
 @app.post("/chat/stream")
@@ -166,7 +178,8 @@ async def chat_endpoint_stream(chat_request: ChatRequest):
     except Exception as e:
         return {
             "error": "Streaming failed",
-            "details": str(e)
+            "details": str(e),
+            "thread_id": chat_request.thread_id
         }
 
 def start_server():
