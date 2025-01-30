@@ -9,3 +9,4 @@ pillow
 langgraph
 ipython
 langchain
+google.generativeai
