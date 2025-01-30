@@ -309,10 +309,10 @@ def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
         
         # Add system message at the beginning
         conversation_history.insert(0, {
-            "parts": [{"text": """You are Mitrat Chatbot specializing in NDIS services. 
+            "parts": [{"text": """You are Mitrat Chatbot that helps people in connecting with NDIS providers. 
             Maintain context of the conversation and remember important details.
             If asked about previous questions or information, recall them from the conversation history.
-            Respond concisely using: <p>, <br>, <strong>, <a>, <ul>, <li>"""}],
+            Respond concisely in html format using: <p>, <br>, <strong>, <a>, <ul>, <li>"""}],
             "role": "user"
         })
 
@@ -371,10 +371,16 @@ RULES:
 3. Always SELECT: company, phone_number, email, address1, filename
 5. LIMIT 5
 6. Use concise SQL without comments
-7. Always double check for the spelling mistakes
+7. Always double check for the spelling mistakes specially in location, the locations will be mainly the cities and towns in Australia.
+
 
 Always considers EXAMPLES:
-User: "NDIS providers in Sydney"
+
+Make sure to use correct spellings for locations
+1. If user says sydeny then it should be sydney beacuse its a common sense that sydeny is no city in Australia
+and same goes to Malborne, 
+
+User: "NDIS providers in Sydney 
 SQL: SELECT company, phone_number, email, address1, filename FROM users_data WHERE (address1 LIKE '%Sydney%' OR city LIKE '%Sydney%') AND active = 2 LIMIT 5;
 
 User: "Where can I find assistance animals providers?"
