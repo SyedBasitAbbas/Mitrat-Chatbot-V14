@@ -15,7 +15,7 @@ import mysql.connector
 from mysql.connector import Error, errorcode
 import sys
 import time
-from openai import OpenAI
+import google.generativeai as genai
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import MessagesState
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -24,8 +24,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 load_dotenv(override=True)
 print("Environment variables loaded")
 
-# Initialize the client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize Gemini client
+gemini_key = os.getenv('GEMINI_API_KEY')
+if not gemini_key:
+    raise ValueError("GEMINI_API_KEY environment variable not set")
+genai.configure(api_key=gemini_key)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Remove the connection_pool initialization from the global scope
 connection_pool = None
@@ -131,6 +135,7 @@ class State(TypedDict):
     sql_query: str | None
     query_results: List[Dict] | None
     performance_metrics: Dict[str, str]
+    thread_id: str | None
 
 def print_performance_metrics(state: Dict) -> None:
     """Helper function to print performance metrics"""
@@ -173,12 +178,8 @@ def detect_intent_node(state: State) -> Dict[str, Any]:
         ANSWER:"""
         
         # Call the LLM for intent classification
-        intent_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0,
-            messages=[{"role": "system", "content": prompt}]
-        )
-        intent = intent_response.choices[0].message.content.strip().lower()
+        intent_response = model.generate_content(prompt)
+        intent = intent_response.text.strip().lower()
         print(f"Intent detected: {intent}")
         
         elapsed = time.time() - start_time
@@ -278,12 +279,7 @@ def should_continue_after_intent(state: State) -> str:
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def call_model_with_retry(messages):
     print("Retrying to get the response")
-    return client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        temperature=0.2,
-        max_tokens=500,
-    )
+    return model.generate_content(messages)
 
 def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
     start_time = time.time()
@@ -293,36 +289,41 @@ def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
         # Get all messages from state
         messages = state["messages"]
         
-        # Filter out debug messages and keep only relevant conversation
-        conversation_history = [
-            {"role": "user" if isinstance(msg, HumanMessage) else "assistant", 
-             "content": msg.content}
-            for msg in messages 
-            if not (isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.startswith("(Debug)"))
-        ]
+        # Convert messages to Gemini format, filtering out SQL-related messages
+        conversation_history = []
+        for msg in messages:
+            # Skip debug messages, SQL queries, and query results
+            if (isinstance(msg, AIMessage) and isinstance(msg.content, str) and 
+                (msg.content.startswith("(Debug)") or 
+                 msg.content.startswith("Generated SQL:") or 
+                 msg.content.startswith("Retrieved schemas"))):
+                continue
+            if isinstance(msg, ToolMessage):
+                continue
+                
+            # Convert to Gemini format
+            conversation_history.append({
+                "parts": [{"text": msg.content}],
+                "role": "user" if isinstance(msg, HumanMessage) else "model"
+            })
         
         # Add system message at the beginning
         conversation_history.insert(0, {
-            "role": "system",
-            "content": """You are Mitrat Chatbot specializing in NDIS services. 
+            "parts": [{"text": """You are Mitrat Chatbot specializing in NDIS services. 
             Maintain context of the conversation and remember important details.
             If asked about previous questions or information, recall them from the conversation history.
-            Respond concisely using: <p>, <br>, <strong>, <a>, <ul>, <li>"""
+            Respond concisely using: <p>, <br>, <strong>, <a>, <ul>, <li>"""}],
+            "role": "user"
         })
-        
-        # Add retry with specific error handling
-        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=4))
-        def safe_chat_completion():
-            return client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=conversation_history,
-                temperature=0.3,
-                max_tokens=300
-            )
-            
-        response = safe_chat_completion()
-        content = response.choices[0].message.content.strip()
-        
+
+        # Generate response with proper error handling
+        try:
+            response = model.generate_content(conversation_history)
+            content = response.text
+        except Exception as e:
+            print(f"Gemini API error: {str(e)}")
+            content = "Sorry, I'm having trouble generating a response right now."
+
         return {
             "messages": [AIMessage(content=content)],
             "performance_metrics": {
@@ -370,6 +371,7 @@ RULES:
 3. Always SELECT: company, phone_number, email, address1, filename
 5. LIMIT 5
 6. Use concise SQL without comments
+7. Always double check for the spelling mistakes
 
 Always considers EXAMPLES:
 User: "NDIS providers in Sydney"
@@ -381,17 +383,23 @@ SQL: "SELECT company, phone_number, email, address1, filename FROM users_data WH
 User:What are the newest NDIS providers listed? OR Can you show me the latest NDIS providers?
 SQL: SELECT company, phone_number, email, address1, filename FROM users_data WHERE active = 2 ORDER BY modtime DESC LIMIT 5;
 
+User: Show me providers for customised prosthetics.
+SQL: SELECT company, phone_number, email, address1, filename FROM users_data WHERE (first_name LIKE '%customised%' 
+OR first_name LIKE '%prosthetics%' 
+OR last_name LIKE '%customised%' 
+OR last_name LIKE '%prosthetics%'
+OR company LIKE '%customised%' 
+OR specialisation LIKE '%customised%'
+OR specialisation LIKE '%prosthetics%'
+OR search_description LIKE '%customised%'
+OR search_description LIKE '%prosthetics%' ) AND active = 2 LIMIT 5;
+
 DIRECTLY OUTPUT THE SQL QUERY:"""
         
         # Single LLM call with temperature=0
         start = time.time()
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Consider gpt-3.5-turbo for faster response
-            temperature=0,
-            messages=[{"role": "system", "content": combined_prompt}],
-            max_tokens=200  # Limit response length
-        )
-        sql_query = response.choices[0].message.content.strip()
+        response = model.generate_content(combined_prompt)
+        sql_query = response.text.strip()
         
         # Simple cleanup instead of separate parsing
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
@@ -475,28 +483,55 @@ def execute_query_node(state: State) -> Dict[str, Any]:
         }
 
 def explain_results_node(state: State) -> Dict[str, Any]:
-    """Generate a natural language explanation of the SQL results"""
+    """Generate a natural language explanation of the SQL results with formatted HTML"""
     start_time = time.time()
     print("NODE: explain_results_node - RUNNING")
     
     query_results = state.get("query_results", [])
     if not query_results:
         return {
-            "messages": [AIMessage(content="No results found!!!.")]
+            "messages": [AIMessage(content="No results found.")]
         }
     
-    # Generate the explanation with all required fields
-    explanation = "Here are the providers I found:\n\n"
-    for result in query_results:
-        explanation += f"<h2>{result.get('company', 'Unknown')}</h2>\n"
-        explanation += f"<p><strong>Phone:</strong> {result.get('phone_number', 'N/A')}<br>\n"
-        explanation += f"<strong>Email:</strong> {result.get('email', 'N/A')}<br>\n"
-        explanation += f"<strong>Location:</strong> {result.get('address1', 'N/A')}, {result.get('city', '')}, {result.get('state_code', '')}<br>\n"
-        explanation += f"<strong>Profile:</strong> <a href=\"https://mitrat.com.au/{result['filename']}\" target=\"_blank\">View Profile</a></p><br>\n"
+    # Generate the explanation with proper HTML structure
+    explanation = ['<div class="providers-list">']
+    explanation.append('    <h1>Here are the providers I found:</h1>')
+    explanation.append('    ')  # Blank line after header
     
+    for idx, result in enumerate(query_results):
+        # Clean up location components and create full location string
+        location = result.get('address1', '')
+        if location:
+            if result.get('city'):
+                location += f", {result.get('city')}"
+            if result.get('state_code'):
+                location += f", {result.get('state_code')}"
+        
+        # Format provider details with proper indentation
+        provider_html = f"""    <div class="provider">
+        <h2>{result.get('company', 'Unknown')}</h2>
+        <div class="provider-details">
+            <p>
+                <strong>Phone:</strong> {result.get('phone_number', 'N/A')}<br>
+                <strong>Email:</strong> {result.get('email', 'N/A')}<br>
+                <strong>Location:</strong> {location or 'N/A'}<br>
+                <strong>Profile:</strong> <a href="https://mitrat.com.au/{result['filename']}" target="_blank">View Profile</a>
+            </p>
+        </div>
+    </div>"""
+        
+        explanation.append(provider_html)
+        
+        # Add spacing between providers except after the last one
+        if idx < len(query_results) - 1:
+            explanation.append('    ')
+    
+    explanation.append('</div>')
+    
+    # Calculate elapsed time and prepare return object
     elapsed = time.time() - start_time
     result = {
-        "messages": [AIMessage(content=explanation)],
+        "messages": [AIMessage(content="\n".join(explanation))],
         "performance_metrics": {
             **state.get("performance_metrics", {}),
             "explain_results_time": f"{elapsed:.2f}s"
