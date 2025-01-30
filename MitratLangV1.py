@@ -111,23 +111,26 @@ def execute_query_tool(query: str) -> List[Dict[str, Any]]:
         cursor.execute(query)
         results = cursor.fetchall()
         print(f"[Tool Log] Query executed successfully. Results: {results}")
+        
         return results
     except Exception as e:
         print(f"[Tool Log] Error executing query: {str(e)}")
-        return []
+        return {
+            "error": str(e)
+        }
     finally:
         if connection:
             print("[Tool Log] Closing connection...")
             connection.close()
 
 class State(TypedDict):
-    # We store all messages exchanged so far
     messages: Annotated[List[AnyMessage], add_messages]
     intent: str | None
     schema: str | None  
     chosen_table: str | None
     sql_query: str | None
     query_results: List[Dict] | None
+    performance_metrics: Dict[str, str]
 
 def print_performance_metrics(state: Dict) -> None:
     """Helper function to print performance metrics"""
@@ -142,56 +145,33 @@ def detect_intent_node(state: State) -> Dict[str, Any]:
     start_time = time.time()
     print("NODE: detect_intent_node - RUNNING")
     
-    # Get the last HUMAN message (not AI or Tool messages)
-    user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "No user message")
-    
-    # LLM prompt for intent classification
-    prompt = f"""
-    Analyze if this is a conversational query or a database query: "{user_msg}"
-
-    RULES FOR INTENT CLASSIFICATION:
-
-    1. CONVERSATIONAL Queries (return "conversational"):
-        - Greetings and farewells:
-            * Hi, Hello, Hey, Good morning/afternoon/evening
-            * Bye, Goodbye, See you, Thanks
-        - Personal introductions:
-            * "Hi I'm [name]"
-            * "My name is [name]"
-        - General questions about:
-            * Bot identity ("who are you", "what's your name")
-            * NDIS information ("what is NDIS", "how does NDIS work")
-            * Available services ("what services do you provide")
-            * Help and assistance ("how can you help me")
-        - Questions about:
-            * FAQs or help sections
-            * Blogs or articles
-            * Community forums
-            * Registration process
-            * Contact information
-        - Small talk and general chat
-
-    2. DATABASE Queries (return "query"):
-        - Searching for providers:
-            * "Find providers in [location]"
-            * "Show me services in [area]"
-            * "List NDIS providers"
-        - Specific service requests:
-            * "Plan management providers"
-            * "Support coordination services"
-            * "Therapy providers near me"
-        - Location-based searches:
-            * "Providers in Melbourne"
-            * "Services available in Sydney"
-        - Combined searches:
-            * "Find support coordinators in Brisbane"
-            * "Show plan managers in Perth"
-        - Any query about finding, listing, or showing providers/services
-
-    Return ONLY "conversational" or "query" as your answer.
-    """
-    
     try:
+        # Get the last HUMAN message (not AI or Tool messages)
+        user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "No user message")
+        
+        # Optimized LLM prompt for intent classification
+        prompt = f"""CLASSIFY THIS QUERY IN 1 WORD: "{user_msg}"
+        
+        [RULES]
+        Reply "query" ONLY if it contains:
+        - Provider/service search terms: find, list, show, search, providers, services, "near me", location names
+        - Specific service types: plan management, support coordination, therapy
+        - Field-specific terms: phone, email, location, profile
+        
+        Reply "conversational" for:
+        - Greetings (hi, hello, bye)
+        - NDIS/process questions
+        - General help/FAQ
+        - Bot identity questions
+        
+        [EXAMPLES]
+        "NDIS providers in Sydney" → query
+        "How do I register?" → conversational
+        "Find assistance animals" → query
+        "What's your name?" → conversational
+        
+        ANSWER:"""
+        
         # Call the LLM for intent classification
         intent_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -206,23 +186,25 @@ def detect_intent_node(state: State) -> Dict[str, Any]:
             "messages": [AIMessage(content=f"(Debug) Intent detected: {intent}")],
             "intent": intent,
             "performance_metrics": {
-                "intent_detection": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "intent_detection_time": f"{elapsed:.2f}s"
             }
         }
-        print_performance_metrics(result)
         return result
     except Exception as e:
-        print(f"LLM ERROR in detect_intent_node: {str(e)}")
+        elapsed = time.time() - start_time
         return {
             "messages": [AIMessage(content="Sorry, I had trouble understanding your intent.")],
             "intent": None,
             "performance_metrics": {
-                "intent_detection": "N/A"
+                **state.get("performance_metrics", {}),
+                "intent_detection_time": f"{elapsed:.2f}s"
             }
         }
 
 def get_schema_node(state: State) -> Dict[str, List[ToolMessage]]:
     """Get schemas for relevant tables based on user query"""
+    start_time = time.time()
     print("\nNODE: get_schema_node - RUNNING")
     
     try:
@@ -242,6 +224,7 @@ def get_schema_node(state: State) -> Dict[str, List[ToolMessage]]:
         state["schema"] = combined_schemas
         #print(f"Schema stored in state: {combined_schemas[:200]}...")  
         
+        elapsed = time.time() - start_time
         return {
             "messages": [
                 ToolMessage(
@@ -251,11 +234,14 @@ def get_schema_node(state: State) -> Dict[str, List[ToolMessage]]:
                     additional_kwargs={"schemas": combined_schemas}
                 )
             ],
-            # Need to explicitly return schema update
-            "schema": combined_schemas
+            "schema": combined_schemas,
+            "performance_metrics": {
+                **state.get("performance_metrics", {}),
+                "get_schema_time": f"{elapsed:.2f}s"
+            }
         }
     except Exception as e:
-        print(f"Error in get_schema_node: {str(e)}")
+        elapsed = time.time() - start_time
         return {
             "messages": [
                 ToolMessage(
@@ -264,7 +250,11 @@ def get_schema_node(state: State) -> Dict[str, List[ToolMessage]]:
                     tool_call_id="schema_lookup"
                 )
             ],
-            "schema": None
+            "schema": None,
+            "performance_metrics": {
+                **state.get("performance_metrics", {}),
+                "get_schema_time": f"{elapsed:.2f}s"
+            }
         }
 
 def should_continue_after_intent(state: State) -> str:
@@ -296,23 +286,19 @@ def call_model_with_retry(messages):
     )
 
 def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
-    print("NODE: conversational_agent_node - RUNNING")
     start_time = time.time()
+    print("NODE: conversational_agent_node - RUNNING")
     
     try:
-        # Get all messages in the conversation
-        conversation_history = [
-            {"role": "user" if isinstance(msg, HumanMessage) else "assistant", 
-             "content": msg.content}
-            for msg in state["messages"]
-        ]
+        # Get only the last HUMAN message
+        user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "")
         
-        # Create message list with conversation history
+        # Simplified message structure
         messages = [
-            {"role": "system", "content": """You are Mitrat Chatbot, specializing in NDIS services. Respond concisely and naturally.
-
-Key Features:
-1. Keep responses under 100 words unless complex explanation needed
+            {
+                "role": "system",
+                "content": """You are Mitrat Chatbot specializing in NDIS services. Respond concisely:
+1. Keep responses under 100 words
 2. Use simple, direct language
 3. Provide specific, actionable information
 4. Include links to Mitrat website when relevant
@@ -331,13 +317,20 @@ A: "<p>NDIS (National Disability Insurance Scheme) provides funding for disabili
 
 Q: "How do I find providers?"
 A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filtering by location<br>3. Choosing specific services</p>"
-"""},  # Your existing system message
-            *conversation_history
+"""},  
         ]
-        
 
-        response = call_model_with_retry(messages)
-        
+        # Add retry with specific error handling
+        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=4))
+        def safe_chat_completion():
+            return client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0,
+                max_tokens=300
+            )
+            
+        response = safe_chat_completion()
         content = response.choices[0].message.content.strip()
         
         # Print performance metrics
@@ -347,7 +340,8 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
         return {
             "messages": [AIMessage(content=content)],
             "performance_metrics": {
-                "response_time": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "conversational_response_time": f"{elapsed:.2f}s"
             }
         }
         
@@ -358,6 +352,7 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
         return {
             "messages": [AIMessage(content="I apologize, but I encountered an error. Please try again.")],
             "performance_metrics": {
+                **state.get("performance_metrics", {}),
                 "response_time": f"{elapsed:.2f}s",
                 "error": str(e)
             }
@@ -366,114 +361,68 @@ A: "<p>You can find providers by:<br>1. Using our search bar above<br>2. Filteri
 def refine_query_node(state: State) -> Dict[str, Any]:
     """Refine the user query into a SQL query"""
     start_time = time.time()
+    print("NODE: refine_query_node - RUNNING")
     try:
         # Get the last HUMAN message
         user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "")
         
         print("[Refine Query Node] Refining query based on schemas...")
         schemas = state.get("schema", "")
-        print(schemas)
+        #print(schemas)
         
-        # First prompt to refine the query
-        refine_prompt = f"""As an SQL expert, convert this user request into a clear, natural language query using ONLY the exact field names from the provided schemas.
+        # Combined prompt for both refinement and SQL generation
+        combined_prompt = f"""As an SQL expert, directly convert this user request into a valid SQL query using EXACT field names from these schemas:
 
 USER REQUEST: "{user_msg}"
 
-AVAILABLE SCHEMAS:
+SCHEMAS:
 {schemas}
-Always follow the above schemas and dont make up any field names.
 
-IMPORTANT RULES:
-1. You MUST use EXACT field names as they appear in the schemas
-2. DO NOT invent or modify field names
-3. If a field name is 'company', don't say 'company_name'
-4. If a field name is 'state_code', don't say 'state'
-5. Only reference tables and columns that exist in the schemas above
-6. Always show active = 2 
-7. Always specify the exact columns needed, including 'email' and 'address1'
-8. Include all necessary table joins
-9. Always use the LIKE operator for keyword matching
-10. This chatbot is for NDIS providers so if user mentions NDIS,providers, or NDIS providers,dont add (NDIS,provider) in the query or keyword.(font add ndis in refined query)
-11. Join with users_reviews table when rating_overall information is needed
-12. Always add OR conditions in wildcards for keywords searching so that we can get results according to user query.
-13. Always include the 'filename' field in the SELECT statement.
-14. For keywords always search in first_name, last_name and company in usersdata.
-15. For locations search in address1.
-*16. Never return the ndis or provider word in refined query.*
+RULES:
+1. Use proper SQL syntax with exact field names, the following words are not keywords (NDIS,provider,assistance)
+2. WHERE clauses MUST include:
+   - active = 2
+   - (address1 LIKE '%<location>%' OR city LIKE '%<location>%') for locations
+   - (first_name LIKE '%<keyword>%' OR last_name LIKE '%<keyword>%' OR company LIKE '%<keyword>%') for names
+3. Always SELECT: company, phone_number, email, address1, filename
+5. LIMIT 5
+6. Use concise SQL without comments
 
+Always considers EXAMPLES:
+User: "NDIS providers in Sydney"
+SQL: SELECT company, phone_number, email, address1, filename FROM users_data WHERE (address1 LIKE '%Sydney%' OR city LIKE '%Sydney%') AND active = 2 LIMIT 5;
 
+User: "Where can I find assistance animals providers?"
+SQL: "SELECT company, phone_number, email, address1, filename FROM users_data WHERE (first_name LIKE '%animal%' OR last_name LIKE '%animal%' OR company LIKE '%animal%') AND active = 2 LIMIT 5;
 
+User:What are the newest NDIS providers listed? OR Can you show me the latest NDIS providers?
+SQL: SELECT company, phone_number, email, address1, filename FROM users_data WHERE active = 2 ORDER BY modtime DESC LIMIT 5;
 
-For example:
-If user asks "Show me top rated ndis providers in Sydney"
-CORRECT: "Find providers from users_data JOIN users_reviews ON users_data.user_id = users_reviews.provider_id where address1 LIKE '%Sydney%' and active = 2, showing company, phone_number, email, address1, filename, and AVG(rating_overall)"
-If user asks "Find ndis providers in Melbourne"
-CORRECT: "Find providers from users_data where address1 LIKE '%Melbourne%' and active = 2, showing company, phone_number, email, address1, filename"
-If user asks "Show me providers named Smith"
-CORRECT: "Find providers from users_data where (first_name LIKE '%Smith%' OR last_name LIKE '%Smith%' OR company LIKE '%Smith%') and active = 2, showing company, phone_number, email, address1, first_name, lastname, filename"
-If user asks "Find highly rated providers in Brisbane"
-CORRECT: "Find providers from users_data JOIN users_reviews ON users_data.user_id = users_reviews.provider_id where address1 LIKE '%Brisbane%' and active = 2, showing company, phone_number, email, address1, filename, AVG(rating_overall)"
-If user asks "Search for ndis provider Johnson & Associates"
-CORRECT: "Find providers from users_data where (first_name LIKE '%Johnson%' OR last_name LIKE '%Johnson%' OR company LIKE '%Johnson & Associates%') and active = 2, showing company, phone_number, email, address1, first_name, lastname, filename"
-
-Your refined query:"""
-
-        # Start timing for refine query generation
-        refine_start = time.time()
-        print("[Refine Query Node] Generating refined query...")
-        refined_response = client.chat.completions.create(
-            model="gpt-4o-mini",
+DIRECTLY OUTPUT THE SQL QUERY:"""
+        
+        # Single LLM call with temperature=0
+        start = time.time()
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Consider gpt-3.5-turbo for faster response
             temperature=0,
-            messages=[{"role": "system", "content": refine_prompt}]
+            messages=[{"role": "system", "content": combined_prompt}],
+            max_tokens=200  # Limit response length
         )
-        refined_query = refined_response.choices[0].message.content
-        refine_time = time.time() - refine_start
-        print(f"[Refine Query Node] Refined query: {refined_query}")
-
-        # Generate SQL query
-        sql_prompt = f"""Convert this natural language query into a valid SQL query:
+        sql_query = response.choices[0].message.content.strip()
         
-        NATURAL LANGUAGE QUERY: {refined_query}
-        
-        Rules:
-        1. Use proper SQL syntax
-        2. Include the active = 2 condition
-        3. Use LIKE with wildcards for text matching
-        4. Limit results to 5 by default
-        5. Always include 'email' and 'address1' in the SELECT statement
-
-
-
-        Generate only the SQL query, no explanations:"""
-        
-        # Start timing for SQL generation
-        sql_start = time.time()
-        print("[Refine Query Node] Generating SQL query...")
-        sql_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0,
-            messages=[{"role": "system", "content": sql_prompt}]
-        )
-        sql_time = time.time() - sql_start
-        sql_query = sql_response.choices[0].message.content.strip()
-        
-        # Remove triple backticks if present
-        if sql_query.startswith("```sql"):
-            sql_query = sql_query[6:-3].strip()
+        # Simple cleanup instead of separate parsing
+        sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
         
         print(f"[Refine Query Node] Generated SQL: {sql_query}")
         elapsed = time.time() - start_time
         
         return {
-            "messages": [
-                AIMessage(content=f"I've refined your query to: {refined_query}"),
-                AIMessage(content=f"SQL Query: {sql_query}")
-            ],
+            "messages": [AIMessage(content=f"Generated SQL: {sql_query}")],
             "sql_query": sql_query,
             "performance_metrics": {
-                "refine_query": f"{refine_time:.2f}s",
-                "sql_generation": f"{sql_time:.2f}s",
-                "total_refine_node": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "refine_query_time": f"{(time.time()-start):.2f}s",
+                "sql_generation_time": "0.00s"  # Combined metric
             }
         }
     except Exception as e:
@@ -482,37 +431,16 @@ Your refined query:"""
         return {
             "messages": [AIMessage(content="Sorry, I had trouble processing your query.")],
             "performance_metrics": {
-                "refine_query": f"{elapsed:.2f}s",
-                "sql_generation": "0.00s",
-                "total_refine_node": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "refine_query_time": "N/A",
+                "sql_generation_time": "N/A"
             }
         }
-    
 
-
-    '''
-
-        17. Always add ratings:
-            a. Always join using users_data.user_id = users_reviews.user_id
-            b. Include AVG(rating_overall) as avg_rating
-            c. Group results by users_data.user_id
-            d. Sort with highest ratings first using ORDER BY avg_rating DESC
-
-
-        7. For rating-based queries:
-        - Use INNER JOIN users_reviews ON users_data.user_id = users_reviews.member_id
-        - Include GROUP BY users_data.user_id
-        - Add ORDER BY AVG(rating_overall) DESC
-    
-    
-    
-    
-    '''
-
-def execute_query_node(state: State) -> Dict[str, List[ToolMessage]]:
+def execute_query_node(state: State) -> Dict[str, Any]:
     """Execute the SQL query using the tool and return results"""
     start_time = time.time()
-    print("\nNODE: execute_query_node - RUNNING")
+    print("NODE: execute_query_node - RUNNING")
     
     sql_query = state.get("sql_query")
     if not sql_query:
@@ -524,7 +452,8 @@ def execute_query_node(state: State) -> Dict[str, List[ToolMessage]]:
                 tool_call_id="query_execution"
             )],
             "performance_metrics": {
-                "execute_query": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "execute_query_time": f"{elapsed:.2f}s"
             }
         }
     
@@ -541,8 +470,8 @@ def execute_query_node(state: State) -> Dict[str, List[ToolMessage]]:
             )],
             "query_results": results,
             "performance_metrics": {
-                "sql_execution": f"{elapsed:.2f}s",
-                "execute_query": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "execute_query_time": f"{elapsed:.2f}s"
             }
         }
         print_performance_metrics(result)
@@ -557,11 +486,12 @@ def execute_query_node(state: State) -> Dict[str, List[ToolMessage]]:
                 tool_call_id="query_execution"
             )],
             "performance_metrics": {
-                "execute_query": f"{elapsed:.2f}s"
+                **state.get("performance_metrics", {}),
+                "execute_query_time": f"{elapsed:.2f}s"
             }
         }
 
-def explain_results_node(state: State) -> Dict[str, List[AIMessage]]:
+def explain_results_node(state: State) -> Dict[str, Any]:
     """Generate a natural language explanation of the SQL results"""
     start_time = time.time()
     print("NODE: explain_results_node - RUNNING")
@@ -584,28 +514,26 @@ def explain_results_node(state: State) -> Dict[str, List[AIMessage]]:
     elapsed = time.time() - start_time
     result = {
         "messages": [AIMessage(content=explanation)],
-        "explanation": explanation,
         "performance_metrics": {
-            "explain_results": f"{elapsed:.2f}s"
+            **state.get("performance_metrics", {}),
+            "explain_results_time": f"{elapsed:.2f}s"
         }
     }
     print_performance_metrics(result)
     return result
 
+workflow = None
+
 def create_workflow():
-    """
-    Creates and returns the workflow with proper visualization
-    """
+    """Creates and returns the workflow with proper visualization"""
+    global workflow
+    if workflow is not None:
+        return workflow
+
     workflow_start = time.time()
     
-    # First, test DB connection
-    connection = get_connection()
-    if not connection:
-        print("Failed to establish DB connection. Exiting workflow creation.")
-        sys.exit(1)
-
     # Create the workflow with MessagesState for memory
-    workflow = StateGraph(MessagesState)
+    workflow = StateGraph(State)
     
     # Add nodes
     workflow.add_node("detect_intent_node", detect_intent_node)
