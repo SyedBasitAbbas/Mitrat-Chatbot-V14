@@ -37,8 +37,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Mitrat LangGraph API",
-    description="Mitrat API using LangGraph",
-    version="2.0",
+    description="API for processing provider queries using LangGraph",
+    version="1.0",
     lifespan=lifespan
 )
 
@@ -64,7 +64,7 @@ async def root():
         connection = get_connection()
         if connection:
             connection.close()
-        return {"message": "Mitrat LangGraph API v2.0 is running"}
+        return {"message": "Mitrat LangGraph API v1.0 is running"}
     except Exception as e:
         if "Server IP not whitelisted" in str(e):
             raise HTTPException(
@@ -139,8 +139,11 @@ async def chat_endpoint_post(chat_request: ChatRequest):
         }
         
     except Exception as e:
+        error_msg = "Query processing failed"
+        if "Server IP not whitelisted" in str(e):
+            error_msg = "Database connection failed: Server IP not whitelisted. Please add this server's IP to the database whitelist."
         return {
-            "error": "Query processing failed",
+            "error": error_msg,
             "details": str(e),
             "thread_id": chat_request.thread_id
         }
